@@ -1,68 +1,69 @@
-mode: 'train-test'
+# Main Configuration for Swin-Mamba SupResDiffGAN
+mode: 'train-test' # Executes training followed by a full evaluation suite
+use_perceptual_loss: true # Enables LPIPS perceptual loss
 
 model:
-  name: 'SupResDiffGAN_Hybrid' # Enables Mamba block in UNet
-  lr: 0.000005
-  alfa_perceptual: 0.001
-  alfa_adv: 0.008
-  load_model:
+  name: 'SupResDiffGAN_Hybrid' # Triggers the HybridUNet with Mamba bottleneck
+  lr: 0.000005 # Optimized lower learning rate for SSM stability
+  alfa_perceptual: 0.001 # Weight for LPIPS/VGG feature matching
+  alfa_adv: 0.008 # Weight for the relativistic GAN loss
+  load_model: null
 
 trainer:
-  max_epochs: 190
+  max_epochs: 190 #
   max_steps: -1 
-  check_val_every_n_epoch: 5
-  limit_val_batches: 0.25 
-  log_every_n_steps: 10
-  precision: '16-mixed'
-  accelerator: 'gpu'
+  check_val_every_n_epoch: 5 #
+  limit_val_batches: 0.25 # Validates on 25% of the validation set to save time
+  log_every_n_steps: 10 #
+  precision: '16-mixed' # Uses mixed-precision for faster throughput on NVIDIA GPUs
+  accelerator: 'gpu' #
   devices: 1
-  resume_from_checkpoint: null
+  resume_from_checkpoint: null # Set to path if resuming training
 
 dataset:
-  name: 'celeb'
-  batch_size: 32
+  name: 'celeb' # Uses the CelebA dataset
+  batch_size: 32 #
   resize: true
-  scale: 4
+  scale: 4 # 4x Super-Resolution factor
 
 evaluation:
-  mode: 'all'
-  steps: [50, 100, 200]
-  posteriors: ['ddpm', 'ddim']
+  mode: 'all' # Evaluates across all steps and posteriors
+  steps: [50, 100, 200] # Inference steps for evaluation
+  posteriors: ['ddpm', 'ddim'] #
   save_results: true
-  results_file: 'evaluation_results/final_evaluation.csv'
+  results_file: 'evaluation_results/final_evaluation.csv' #
 
 checkpoint:
-  monitor: 'val/LPIPS'
-  dirpath: 'models/checkpoints/'
+  monitor: 'val/LPIPS' # Primary metric for saving the best model
+  dirpath: 'models/checkpoints/' #
   save_top_k: 1
   mode: 'min'
-  save_last: true
-  filename: 'SupResDiffGAN-{epoch:02d}-{val/LPIPS:.4f}'
+  save_last: true # Saves last.ckpt for resuming
+  filename: 'SupResDiffGAN-{epoch:02d}-{val/LPIPS:.4f}' #
 
-autoencoder: 'VAE'
-feature_extractor: true
-use_perceptual_loss: true
+autoencoder: 'VAE' # Uses the VAE for latent space projection
+feature_extractor: true # Uses the optimized feature extractor for perceptual loss
 
-unet:
+unet: # Channels for the Hybrid Swin-Mamba UNet
   - 64
   - 96
   - 128
-  - 256
+  - 256 # Mamba bottleneck applied at this depth
 
 diffusion:
-  timesteps: 500
-  beta_type: 'cosine'
-  posterior_type: 'ddpm'
-  validation_timesteps: 100
-  validation_posterior_type: 'ddim'
+  timesteps: 500 # Total diffusion steps
+  beta_type: 'cosine' #
+  posterior_type: 'ddpm' #
+  validation_timesteps: 100 # Faster validation using 100 steps
+  validation_posterior_type: 'ddim' # Uses DDIM for accelerated validation
 
 discriminator:
-  in_channels: 6
+  in_channels: 6 # Concatenated SR/HR and LR features
   channels:
     - 64
     - 128
     - 256
 
 wandb:
-  project: 'SupResDiffGAN'
-  entity: 'samarthya04-kiit-deemed-to-be-university'
+  project: 'SupResDiffGAN' #
+  entity: 'samarthya04-kiit-deemed-to-be-university' #
