@@ -1,16 +1,16 @@
 # Main Configuration for Swin-Mamba SupResDiffGAN
-mode: 'train-test' # Executes training followed by a full evaluation suite
+mode: 'train' # Executes training followed by a full evaluation suite
 use_perceptual_loss: true # Enables LPIPS perceptual loss
 
 model:
   name: 'SupResDiffGAN_Hybrid' # Triggers the HybridUNet with Mamba bottleneck
   lr: 0.000005 # Optimized lower learning rate for SSM stability
   alfa_perceptual: 0.001 # Weight for LPIPS/VGG feature matching
-  alfa_adv: 0.008 # Weight for the relativistic GAN loss
+  alfa_adv: 0.004 # Weight for the relativistic GAN loss
   load_model: null
 
 trainer:
-  max_epochs: 50 #
+  max_epochs: 60 #
   max_steps: -1 
   check_val_every_n_epoch: 5 #
   limit_val_batches: 0.25 # Validates on 25% of the validation set to save time
@@ -20,11 +20,11 @@ trainer:
   gradient_clip_val: 1.0
   accelerator: 'gpu' #
   devices: 1
-  resume_from_checkpoint: 'models/checkpoints/last.ckpt' # Set to path if resuming training
+  resume_from_checkpoint: 'models/checkpoints/SupResDiffGAN_Hybrid-epoch=49-val/LPIPS=0.210.ckpt' # Set to path if resuming training
 
 dataset:
   name: 'celeb' # Uses the CelebA dataset
-  batch_size: 4 #
+  batch_size: 16 #
   resize: true
   scale: 4 # 4x Super-Resolution factor
 

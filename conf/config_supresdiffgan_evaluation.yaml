@@ -2,11 +2,11 @@ mode: 'test'
 use_perceptual_loss: true
 
 model:
-  name: 'SupResDiffGAN'
+  name: 'SupResDiffGAN_Hybrid'
   lr: 0.000005
   alfa_perceptual: 0.001
-  alfa_adv: 0.008
-  load_model: "models/checkpoints/SupResDiffGAN-epoch=184-val/LPIPS=0.193.ckpt"
+  alfa_adv: 0.004
+  load_model: "models/checkpoints/SupResDiffGAN_Hybrid-epoch=49-val/LPIPS=0.210.ckpt"
 
 trainer:
   max_epochs: 190
@@ -17,7 +17,7 @@ trainer:
   precision: 16-mixed
   accelerator: 'gpu'
   devices: 1
-  resume_from_checkpoint: "models/checkpoints/SupResDiffGAN-epoch=184-val/LPIPS=0.193.ckpt"
+  resume_from_checkpoint: "models/checkpoints/SupResDiffGAN_Hybrid-epoch=49-val/LPIPS=0.210.ckpt"
 
 dataset:
   name: 'celeb'
@@ -35,7 +35,7 @@ evaluation:
     - 'ddpm'
     - 'ddim'
   save_results: true
-  results_file: 'evaluation_results/final_evaluation.csv'
+  results_file: 'evaluation_results/final_evaluation_mamba.csv'
 
 checkpoint:
   monitor: 'val/LPIPS'

@@ -2,6 +2,7 @@ import numpy as np
 import pytorch_lightning as pl
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import os
 import wandb
 from matplotlib import pyplot as plt
@@ -13,7 +14,7 @@ import time
 class SupResDiffGAN(pl.LightningModule):
     """
     Optimized SupResDiffGAN for Super-Resolution.
-    Integrates LPIPS perceptual loss and dynamic EMA noise scheduling.
+    Integrates LPIPS perceptual loss, Edge-Aware loss, and dynamic EMA noise scheduling.
     """
 
     def __init__(
@@ -58,7 +59,7 @@ class SupResDiffGAN(pl.LightningModule):
         self.s = 0
 
     def normalize_for_lpips(self, x: torch.Tensor) -> torch.Tensor:
-        """Rescales a float32 tensor from [-1, 1] to [0, 1] for LPIPS compatibility."""
+        """Rescales a tensor from [-1, 1] to [0, 1] for LPIPS compatibility."""
         return torch.clamp((x.float() + 1) / 2, 0, 1)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -68,6 +69,15 @@ class SupResDiffGAN(pl.LightningModule):
         with torch.no_grad():
             x_out = self.ae.decode(x_gen / self.ae.scaling_factor).sample
         return torch.clamp(x_out, -1, 1)
+
+    def get_edge_loss(self, sr, hr):
+        """Calculates Sobel edge loss to prioritize high-frequency reconstruction."""
+        def sobel_op(x):
+            # Simple gradient filters
+            dx = x[:, :, :, :-1] - x[:, :, :, 1:]
+            dy = x[:, :, :-1, :] - x[:, :, 1:, :]
+            return torch.abs(dx).mean() + torch.abs(dy).mean()
+        return self.content_loss(sobel_op(sr), sobel_op(hr))
 
     def training_step(self, batch: dict, batch_idx: int):
         lr_img, hr_img = batch["lr"], batch["hr"]
@@ -107,10 +117,13 @@ class SupResDiffGAN(pl.LightningModule):
     def generator_loss(self, x0, x_gen, hr_img, sr_img, hr_s_img, sr_s_img) -> torch.Tensor:
         content_loss = self.content_loss(x_gen, x0)
         
-        # Cast to float for LPIPS compatibility during mixed-precision training
+        # Perceptual Loss with float casting
         perceptual_loss = self.lpips(self.normalize_for_lpips(sr_img), self.normalize_for_lpips(hr_img))
         if self.vgg_loss is not None:
             perceptual_loss += self.vgg_loss(sr_img, hr_img)
+            
+        # Frequency edge constraint
+        edge_loss = self.get_edge_loss(sr_img, hr_img)
 
         y = torch.randint(0, 2, (hr_s_img.shape[0],), device=self.device).view(-1, 1, 1, 1)
         first = torch.where(y == 0, sr_s_img, hr_s_img)
@@ -118,8 +131,10 @@ class SupResDiffGAN(pl.LightningModule):
         prediction = self.discriminator(torch.cat([first, second], dim=1))
         adversarial_loss = self.adversarial_loss(prediction, 1.0 - y.float())
 
-        total_loss = (content_loss + self.alfa_perceptual * perceptual_loss + self.alfa_adv * adversarial_loss)
-        self.log_dict({"train/g_content": content_loss, "train/g_lpips": perceptual_loss}, on_epoch=True)
+        total_loss = (content_loss + self.alfa_perceptual * perceptual_loss + 
+                      self.alfa_adv * adversarial_loss + 0.05 * edge_loss)
+        
+        self.log_dict({"train/g_content": content_loss, "train/g_lpips": perceptual_loss, "train/g_edge": edge_loss}, on_epoch=True)
         self.calculate_ema_noise_step(prediction, 1.0 - y.float())
         return total_loss
 
@@ -139,8 +154,9 @@ class SupResDiffGAN(pl.LightningModule):
         self.log_dict({"train/ema_s": self.s, "train/ema_acc": acc}, on_epoch=True)
 
     def configure_optimizers(self):
-        opt_g = torch.optim.Adam(self.generator.parameters(), lr=self.lr, betas=self.betas)
-        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=self.lr, betas=self.betas)
+        # Using a slight weight decay for GAN stability
+        opt_g = torch.optim.Adam(self.generator.parameters(), lr=self.lr, betas=self.betas, weight_decay=1e-6)
+        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=self.lr, betas=self.betas, weight_decay=1e-6)
         return [opt_g, opt_d]
 
     def validation_step(self, batch: tuple[torch.Tensor, torch.Tensor], batch_idx: int) -> None:
@@ -149,7 +165,6 @@ class SupResDiffGAN(pl.LightningModule):
         sr_img = self(lr_img)
         padding_info = {"lr": batch["padding_data_lr"], "hr": batch["padding_data_hr"]}
 
-        # Cast to float32 for metric libraries and plotting
         hr_f32 = hr_img.float()
         sr_f32 = sr_img.float()
 
@@ -159,8 +174,8 @@ class SupResDiffGAN(pl.LightningModule):
                 for i in range(min(3, lr_img.shape[0])):
                     hr_np = (hr_f32[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2
                     sr_np = (sr_f32[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2
-                    hr_np = np.clip(hr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :], 0, 1)
-                    sr_np = np.clip(sr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :], 0, 1)
+                    hr_np = np.clip(hr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :], 0, 1).astype(np.float32)
+                    sr_np = np.clip(sr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :], 0, 1).astype(np.float32)
                     
                     psnr = peak_signal_noise_ratio(hr_np, sr_np, data_range=1.0)
                     ssim = structural_similarity(hr_np, sr_np, channel_axis=-1, data_range=1.0)
@@ -176,8 +191,8 @@ class SupResDiffGAN(pl.LightningModule):
 
         metrics = {"PSNR": [], "SSIM": []}
         for i in range(lr_img.shape[0]):
-            hr_np = np.clip((hr_f32[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
-            sr_np = np.clip((sr_f32[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
+            hr_np = np.clip((hr_f32[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1).astype(np.float32)
+            sr_np = np.clip((sr_f32[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1).astype(np.float32)
             hr_np = hr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :]
             sr_np = sr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :]
             metrics["PSNR"].append(peak_signal_noise_ratio(hr_np, sr_np, data_range=1.0))
@@ -196,8 +211,7 @@ class SupResDiffGAN(pl.LightningModule):
             img_sets = [(hr_img[i], "HR GT", axs[0, i]), (lr_img[i], "LR Input", axs[1, i]), 
                         (sr_img[i], f"SR Pred\nLPIPS: {lpips_val:.3f}", axs[2, i])]
             for img_t, lbl, ax in img_sets:
-                # Ensure float32 and correct range for Matplotlib
-                img_np = np.clip((img_t.detach().cpu().float().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
+                img_np = np.clip((img_t.detach().cpu().float().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1).astype(np.float32)
                 ax.imshow(img_np)
                 ax.set_title(lbl, fontsize=9, color="white")
                 ax.axis('off')
@@ -215,8 +229,8 @@ class SupResDiffGAN(pl.LightningModule):
         elapsed_time = time.perf_counter() - start_time
         metrics = {"PSNR": [], "SSIM": []}
         for i in range(lr_img.shape[0]):
-            hr_np = np.clip((hr_img[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
-            sr_np = np.clip((sr_img[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1)
+            hr_np = np.clip((hr_img[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1).astype(np.float32)
+            sr_np = np.clip((sr_img[i].detach().cpu().numpy().transpose(1, 2, 0) + 1) / 2, 0, 1).astype(np.float32)
             hr_np = hr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :]
             sr_np = sr_np[: padding_info["hr"][i][1], : padding_info["hr"][i][0], :]
             metrics["PSNR"].append(peak_signal_noise_ratio(hr_np, sr_np, data_range=1.0))
