@@ -1,42 +1,43 @@
 # ==============================================================================
 # Hi-MambaSR: Hierarchical State-Space Refinement for Latent Diffusion SR
-# High-Throughput Research Configuration | Target: LPIPS 0.210
+# Optimized Configuration | Target: LPIPS < 0.190
 # ==============================================================================
 
-mode: 'train' 
+mode: 'train-test' 
 use_perceptual_loss: true 
 
 model:
   name: 'Hi-MambaSR'
-  lr: 2.0e-6                  # Compensates for larger effective batch size
-  alfa_perceptual: 0.04    
-  alfa_adv: 0.004              
-  load_model: 'models/checkpoints/last.ckpt' # Loads pre-architecture-fix weights (strict=False)
+  lr: 2e-5                    # Slightly higher to compensate for AdamW + L1 dynamics
+  alfa_perceptual: 0.08       # Increased: now that LPIPS/VGG gradients actually flow,
+                              # this weight directly drives perceptual fidelity
+  alfa_adv: 1e-3              # Reduced: adversarial signal is healthy now, 
+                              # lowering it prevents texture hallucinations
+  load_model: null            # CRITICAL: Start fresh. Old checkpoints trained with
+                              # broken gradients will poison the new training.
 
 trainer:
-  max_epochs: 50
+  max_epochs: 100             # Extended for proper convergence with corrected losses
   max_steps: -1
-  check_val_every_n_epoch: 5    # Frequent validation to track Swin-Mamba stability
-  limit_val_batches: 0.10       # Validate on 10% of data for rapid feedback
+  check_val_every_n_epoch: 5  
+  limit_val_batches: 0.15     # Slightly more validation for reliable LPIPS tracking
   log_every_n_steps: 10 
-  # BF16 is significantly more stable for Mamba scanning than FP16
   precision: 'bf16-mixed'       
-  accumulate_grad_batches: 16   # Increased to 16 to compensate for small 6GB VRAM physical batch size (4)
+  accumulate_grad_batches: 32   # Increased to 16 to compensate for small 6GB VRAM physical batch size (4)
   gradient_clip_val: 1.0        # Synced with the Mamba stability fixes in train_model.py
   accelerator: 'gpu' 
   devices: 1
-  benchmark: true               # Enable cudnn autotuner for fixed-size inputs
-  resume_from_checkpoint: null  # Must be null to avoid crashing the Adam Optimizer on new RMSNorms
+  benchmark: true             
 
 dataset:
   name: 'celeb'               
-  batch_size: 4                 # Strictly reduced to 4 to prevent 6GB VRAM Out-of-Memory (OOM) crashes
+  batch_size: 2                # Reduced for 6GB VRAM; effective batch = 2 × 32 accumulation = 64
   resize: true
   scale: 4                     
 
 evaluation:
   mode: 'all'                  
-  steps: [25, 50]               # Streamlined sampling steps for evaluation
+  steps: [25, 50]             
   posteriors: ['ddim']          
   save_results: true
   results_file: 'evaluation_results/hi_mambasr_benchmarks.csv'
@@ -44,7 +45,7 @@ evaluation:
 checkpoint:
   monitor: 'val/LPIPS'        
   dirpath: 'models/checkpoints/' 
-  save_top_k: 2
+  save_top_k: 3               # Keep top 3 for post-hoc analysis
   mode: 'min'
   save_last: true              
   filename: 'Hi-MambaSR-{epoch:02d}-{val/LPIPS:.4f}'

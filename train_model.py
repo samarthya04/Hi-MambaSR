@@ -25,7 +25,7 @@ from scripts.exceptions import (
 from scripts.model_config import model_selection
 from scripts.utilis import model_path
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_path="conf", config_name="config_mamba")
 def main(cfg) -> None:
     """
     Main execution script for Hi-MambaSR.
@@ -78,8 +78,9 @@ def main(cfg) -> None:
         check_val_every_n_epoch=cfg.trainer.check_val_every_n_epoch,
         limit_val_batches=cfg.trainer.limit_val_batches,
         log_every_n_steps=cfg.trainer.log_every_n_steps,
-        precision=cfg.trainer.precision, # 16-mixed recommended for Mamba
-        deterministic=True
+        precision=cfg.trainer.precision,
+        benchmark=cfg.trainer.get("benchmark", False),
+        deterministic=False  # deterministic=True is incompatible with Flash Attention & Mamba CUDA kernels
     )
 
     ckpt_path = cfg.trainer.get("resume_from_checkpoint")
@@ -95,13 +96,14 @@ def main(cfg) -> None:
 
         if best_ckpt_path:
             print(f"Convergence reached. Loading weights from: {best_ckpt_path}")
-            model = model.load_from_checkpoint(best_ckpt_path, 
-                                               ae=model.ae, 
-                                               discriminator=model.discriminator, 
-                                               unet=model.generator, 
-                                               diffusion=model.diffusion)
             
-            # Save raw state_dict for deployment/paper distribution
+            # Load the state dict manually to bypass __init__ compilation issues
+            checkpoint = torch.load(best_ckpt_path, map_location=device)
+            
+            # Use the existing model instance to load weights
+            model.load_state_dict(checkpoint['state_dict'])
+            
+            # Now save the clean state_dict
             save_path = f"{final_model_path}_best.pth"
             torch.save(model.state_dict(), save_path)
             print(f"Research weights serialized to: {save_path}")

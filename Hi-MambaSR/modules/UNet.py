@@ -46,7 +46,9 @@ class SwinBlock(nn.Module):
         self.mlp = nn.Sequential(
             nn.Linear(dim, dim * 4),
             nn.GELU(),
-            nn.Linear(dim * 4, dim)
+            nn.Dropout(0.1),
+            nn.Linear(dim * 4, dim),
+            nn.Dropout(0.1),
         )
 
     def _attention_block(self, x, H, W):
@@ -106,7 +108,7 @@ class MultiHeadSelectiveScan(nn.Module):
     """Fused Bi-directional Mamba."""
     def __init__(self, dim: int, scale_factor: int = 4):
         super().__init__()
-        self.mamba = Mamba(d_model=dim, d_state=16, d_conv=4, expand=1)
+        self.mamba = Mamba(d_model=dim, d_state=32, d_conv=4, expand=1)
         self.scale_modulator = nn.Parameter(torch.ones(1) * (1.0 / scale_factor))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -149,7 +151,10 @@ class HybridUNet(nn.Module):
             layers_per_block=2,
             add_attention=[False, False, False, True], 
         )
-        self.swin_deep = SwinBlock(dim=channels[-1])
+        # IMPORTANT: Separate SwinBlock instances for encoder and decoder.
+        # Sharing weights (as a single instance) halves capacity at the deepest level.
+        self.swin_down = SwinBlock(dim=channels[-1])
+        self.swin_up = SwinBlock(dim=channels[-1])
         self.mamba_bottleneck = HiMambaBottleneck(dim=channels[-1])
         self._inject_custom_logic()
         
@@ -189,8 +194,8 @@ class HybridUNet(nn.Module):
                 except AttributeError: return getattr(self.block, name)
 
         self.backbone.mid_block = MambaMidWrapper(self.backbone.mid_block, self.mamba_bottleneck)
-        self.backbone.down_blocks[-1] = SwinBlockWrapper(self.backbone.down_blocks[-1], self.swin_deep)
-        self.backbone.up_blocks[0] = SwinUpBlockWrapper(self.backbone.up_blocks[0], self.swin_deep)
+        self.backbone.down_blocks[-1] = SwinBlockWrapper(self.backbone.down_blocks[-1], self.swin_down)
+        self.backbone.up_blocks[0] = SwinUpBlockWrapper(self.backbone.up_blocks[0], self.swin_up)
 
     def forward(self, lr_latent, x_t, t):
         return self.backbone(torch.cat([x_t, lr_latent], dim=1), timestep=t).sample

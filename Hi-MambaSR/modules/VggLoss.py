@@ -37,7 +37,7 @@ class VGGLoss(nn.Module):
         for param in self.vgg.parameters():
             param.requires_grad = False
             
-        self.mse_loss = nn.MSELoss()
+        self.criterion = nn.L1Loss()  # L1 for sharper perceptual gradients (matches FeatureExtractor)
 
         # Register ImageNet normalization constants as buffers.
         # This ensures they are moved to the correct GPU/device automatically 
@@ -80,8 +80,13 @@ class VGGLoss(nn.Module):
                 x_features = self.vgg(x)
                 y_features = self.vgg(y)
     
-            # 4. Compute MSE in the feature manifold
-            return self.mse_loss(x_features, y_features)
+            # 4. Normalize features to unit variance before computing loss
+            # This prevents high-magnitude feature channels from dominating the gradient
+            x_features = x_features / (x_features.norm(dim=1, keepdim=True) + 1e-8)
+            y_features = y_features / (y_features.norm(dim=1, keepdim=True) + 1e-8)
+    
+            # 5. Compute L1 distance in the normalized feature manifold
+            return self.criterion(x_features, y_features)
 
     def train(self, mode: bool = True):
         """

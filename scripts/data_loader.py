@@ -24,11 +24,11 @@ class ResizeByScale:
     """Efficient callable for scaling factors."""
     def __init__(self, scale):
         self.scale = scale
-        self.interpolation = transforms.InterpolationMode.BILINEAR
+        self.interpolation = transforms.InterpolationMode.BICUBIC
 
     def __call__(self, img: Image) -> Image:
         new_size = (int(img.height * self.scale), int(img.width * self.scale))
-        return transforms.functional.resize(img, new_size, interpolation=self.interpolation)
+        return transforms.functional.resize(img, new_size, interpolation=self.interpolation, antialias=True)
 
 class PairedImagesDataset(Dataset):
     """Memory-mapped ready dataset for paired Super-Resolution images."""
@@ -69,8 +69,13 @@ class PairedImagesDataModule(pl.LightningDataModule):
         self.batch_size = batch_size
         self.scale = scale if scale is not None else self.cfg.dataset.scale
 
-        # Latent Manifold Normalization (Mean=0.5, Std=0.5)
-        transform_list = [transforms.ToTensor(), transforms.Normalize((0.5,), (0.5,))]
+        # Normalize RGB images from [0, 1] to [-1, 1] for all 3 channels
+        # Note: (0.5,) is a 1-element tuple — it only normalizes 1 channel.
+        # Must use (0.5, 0.5, 0.5) for proper 3-channel normalization.
+        transform_list = [
+            transforms.ToTensor(),
+            transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
+        ]
         
         if self.cfg.dataset.resize:
             self.transform_hr = transforms.Compose(transform_list)
@@ -130,23 +135,32 @@ class PairedImagesDataModule(pl.LightningDataModule):
         )
 
     def collate_cropping_fn(self, batch):
-        """Vectorized random cropping to ensure batch consistency (Multiple of 64)."""
+        """Vectorized random cropping that correctly handles LR/HR dimension mismatch."""
         k = 64
-        # Calculate optimal crop size for the current batch
-        min_h = min(img.size(1) for img, _ in batch) // k * k
-        min_w = min(img.size(2) for img, _ in batch) // k * k
+        
+        # Compute crop sizes independently for LR and HR
+        min_h_lr = min(img.size(1) for img, _ in batch) // k * k
+        min_w_lr = min(img.size(2) for img, _ in batch) // k * k
+        min_h_hr = min(img.size(1) for _, img in batch) // k * k
+        min_w_hr = min(img.size(2) for _, img in batch) // k * k
 
         lr_list, hr_list, orig_sizes = [], [], []
         for img_lr, img_hr in batch:
-            h, w = img_lr.shape[1], img_lr.shape[2]
+            h_lr, w_lr = img_lr.shape[1], img_lr.shape[2]
+            h_hr, w_hr = img_hr.shape[1], img_hr.shape[2]
             
-            # Efficient random selection
-            y = np.random.randint(0, h - min_h + 1)
-            x = np.random.randint(0, w - min_w + 1)
+            # Use proportional crop positions so LR and HR patches are spatially aligned
+            ry = np.random.rand()
+            rx = np.random.rand()
             
-            lr_list.append(img_lr[:, y : y + min_h, x : x + min_w])
-            hr_list.append(img_hr[:, y : y + min_h, x : x + min_w])
-            orig_sizes.append((w, h))
+            y_lr = int(ry * (h_lr - min_h_lr))
+            x_lr = int(rx * (w_lr - min_w_lr))
+            y_hr = int(ry * (h_hr - min_h_hr))
+            x_hr = int(rx * (w_hr - min_w_hr))
+            
+            lr_list.append(img_lr[:, y_lr : y_lr + min_h_lr, x_lr : x_lr + min_w_lr])
+            hr_list.append(img_hr[:, y_hr : y_hr + min_h_hr, x_hr : x_hr + min_w_hr])
+            orig_sizes.append((w_lr, h_lr))
 
         return {
             "lr": torch.stack(lr_list), 

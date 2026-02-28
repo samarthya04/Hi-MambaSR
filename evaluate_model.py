@@ -17,7 +17,7 @@ import pandas as pd
 import torch
 import wandb
 from omegaconf import OmegaConf
-from pytorch_lightning import Trainer
+from pytorch_lightning import Trainer, seed_everything
 from pytorch_lightning.loggers import WandbLogger
 from typing import List, Dict
 
@@ -110,11 +110,14 @@ def run_evaluation_suite(cfg, model, trainer: Trainer, test_loader) -> None:
     if cfg.evaluation.save_results:
         save_results_to_csv(results, cfg.evaluation.results_file)
 
-@hydra.main(version_base=None, config_path="conf", config_name="config")
+@hydra.main(version_base=None, config_path="conf", config_name="config_mamba")
 def main(cfg) -> None:
     """
     Inference and Benchmarking entry point for Hi-MambaSR.
     """
+    # Set global seed for research reproducibility
+    seed_everything(42, workers=True)
+    
     # Precision configuration for high-performance inference
     torch.set_float32_matmul_precision('medium')
     
@@ -153,7 +156,7 @@ def main(cfg) -> None:
         devices=cfg.trainer.devices,
         precision=cfg.trainer.precision,
         logger=logger,
-        deterministic=True
+        deterministic=False  # deterministic=True is incompatible with Flash Attention & Mamba CUDA kernels
     )   
 
     run_evaluation_suite(cfg, model, trainer, test_loader)
