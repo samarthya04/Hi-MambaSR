@@ -320,7 +320,7 @@ If you find Hi-MambaSR useful in your research, please consider citing:
 @software{chattree2025himambasr,
   author    = {Chattree, Samarthya Earnest},
   title     = {{Hi-MambaSR}: Hierarchical State-Space Refinement for Latent Diffusion Super-Resolution},
-  year      = {2025},
+  year      = {2026},
   url       = {https://github.com/samarthya04/Hi-MambaSR}
 }
 ```
