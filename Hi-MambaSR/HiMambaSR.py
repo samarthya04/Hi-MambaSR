@@ -26,6 +26,7 @@ class HiMambaSR(pl.LightningModule):
         alfa_perceptual: float = 2e-2,
         alfa_adv: float = 5e-3,
         vgg_loss: nn.Module | None = None,
+        optimizer_8bit: bool = False,
     ) -> None:
         super(HiMambaSR, self).__init__()
         self.save_hyperparameters(ignore=["ae", "discriminator", "unet", "diffusion", "vgg_loss"])
@@ -49,6 +50,7 @@ class HiMambaSR(pl.LightningModule):
         self.alfa_adv = alfa_adv
         self.alfa_perceptual = alfa_perceptual
         self.betas = (0.9, 0.999)
+        self._optimizer_8bit = optimizer_8bit
 
         # Freeze the ENTIRE VAE (encoder + decoder)
         # Unfreezing the decoder is destabilizing: the skip connection already handles
@@ -67,7 +69,7 @@ class HiMambaSR(pl.LightningModule):
             self.generator = torch.compile(self.generator)
 
         self.automatic_optimization = False
-        self.accumulate_grad_batches = 32  # Manual grad accumulation (batch_size=2 × 32 = 64 effective)
+        self.accumulate_grad_batches = 16  # Manual grad accumulation (batch_size=2 × 16 = 32 effective)
         self.test_step_outputs = []
         
         # EMA (Exponential Moving Average) for generator weights
@@ -75,8 +77,10 @@ class HiMambaSR(pl.LightningModule):
         # EMA weights are less noisy than per-step weights, producing more stable
         # and higher-quality outputs. Standard in ESRGAN, Real-ESRGAN, SwinIR.
         self.ema_decay = 0.999
-        self.ema_generator = None  # Initialized lazily on first training step
-        
+        self.ema_generator = copy.deepcopy(self._raw_generator)
+        self.ema_generator.eval()
+        for p in self.ema_generator.parameters():
+            p.requires_grad = False        
         # Noise difficulty progression (EMA)
         self.ema_weight = 0.99
         self.ema_mean = 0.5
@@ -87,6 +91,26 @@ class HiMambaSR(pl.LightningModule):
         self.ae.enable_tiling()
         
         self._register_sobel_kernels()
+
+    def on_load_checkpoint(self, checkpoint: dict) -> None:
+        """Clear incompatible optimizer states when switching optimizer types.
+        
+        Standard AdamW stores states as {exp_avg, exp_avg_sq} in fp32.
+        bitsandbytes AdamW8bit stores states as {state1, state2} in int8.
+        Loading one format into the other causes KeyError crashes.
+        Clearing the optimizer states forces the new optimizer to re-initialize
+        its own format from scratch, while model weights + epoch are preserved.
+        """
+        if self._optimizer_8bit and 'optimizer_states' in checkpoint:
+            for opt_state in checkpoint['optimizer_states']:
+                if 'state' in opt_state:
+                    # Check if any param state has the old AdamW format
+                    for param_id, state in opt_state['state'].items():
+                        if 'exp_avg' in state or 'exp_avg_sq' in state:
+                            opt_state['state'] = {}
+                            print("[Checkpoint] Cleared incompatible AdamW optimizer states "
+                                  "(switching to AdamW8bit — states will re-initialize)")
+                            break
 
     def _register_sobel_kernels(self):
         kx = torch.tensor([[-1, 0, 1], [-2, 0, 2], [-1, 0, 1]], dtype=torch.float32).view(1, 1, 3, 3)
@@ -151,13 +175,6 @@ class HiMambaSR(pl.LightningModule):
 
     def training_step(self, batch: dict, batch_idx: int):
         lr_img, hr_img = batch["lr"], batch["hr"]
-        
-        # Initialize EMA from raw (uncompiled) weights on first step
-        if self.ema_generator is None:
-            self.ema_generator = copy.deepcopy(self._raw_generator)
-            self.ema_generator.eval()
-            for p in self.ema_generator.parameters():
-                p.requires_grad = False
         
         # --- Data Augmentation (Random Flips) ---
         # Applied identically to both LR and HR to maintain spatial alignment
@@ -279,22 +296,20 @@ class HiMambaSR(pl.LightningModule):
         }, prog_bar=True, batch_size=lr_img.shape[0])
         self.calculate_ema_noise_step(prediction.detach(), y.float())
 
-        # --- DISCRIMINATOR UPDATE (Every Other Step, with Accumulation) ---
-        if batch_idx % 2 == 0:
+        # --- DISCRIMINATOR UPDATE (Every 4th Step, with Accumulation) ---
+        # Reduced from every 2nd step: the discriminator converges faster than
+        # the generator in SR-GANs. Updating every 4th step reduces overhead
+        # and reuses cached decoded images from the generator adversarial block.
+        if batch_idx % 4 == 0:
             self.toggle_optimizer(optimizer_d)
             
             # Zero gradients only at the start of each accumulation window
             if batch_idx % self.accumulate_grad_batches == 0:
                 optimizer_d.zero_grad(set_to_none=True)
             
-            with torch.no_grad():
-                s_tensor = torch.full((x0_lat.shape[0],), self.s, device=self.device, dtype=torch.long)
-                
-                sr_s_decoded = self.micro_batch_decode(self.diffusion.forward(x_gen_0.detach(), s_tensor))
-                lr_upsampled_d = F.interpolate(lr_img, size=sr_s_decoded.shape[-2:], mode='bicubic', align_corners=False)
-                sr_s_img = torch.clamp(sr_s_decoded + lr_upsampled_d, -1, 1)
-                
-                hr_s_img = torch.clamp(self.micro_batch_decode(self.diffusion.forward(x0_lat, s_tensor)), -1, 1)
+            # PERF: Reuse sr_s_img and hr_s_img from the generator adversarial block.
+            # These were already decoded above — no need to re-decode the same latents.
+            # This eliminates 2 redundant VAE decode calls per discriminator step.
             
             y = torch.randint(0, 2, (hr_s_img.shape[0],), device=self.device).view(-1, 1, 1, 1)
             first = torch.where(y == 0, hr_s_img, sr_s_img)
@@ -311,7 +326,7 @@ class HiMambaSR(pl.LightningModule):
             self.untoggle_optimizer(optimizer_d)
             self.log("train/d_loss", d_loss, prog_bar=True, batch_size=lr_img.shape[0])
 
-        if batch_idx % 10 == 0:
+        if batch_idx % 50 == 0:
             torch.cuda.empty_cache()
 
     def calculate_ema_noise_step(self, pred: torch.Tensor, y: torch.Tensor) -> None:
@@ -322,11 +337,19 @@ class HiMambaSR(pl.LightningModule):
 
     def configure_optimizers(self):
         gen_params = list(self.generator.parameters())
-            
-        # AdamW decouples weight decay from the gradient update, preventing
-        # the LR warmup + cosine decay from interfering with regularization.
-        opt_g = torch.optim.AdamW(gen_params, lr=self.lr, betas=self.betas, weight_decay=1e-4)
-        opt_d = torch.optim.AdamW(self.discriminator.parameters(), lr=self.lr * 0.5, betas=self.betas, weight_decay=1e-4)
+        
+        # 8-bit Adam via bitsandbytes: quantizes optimizer states (m, v) from fp32
+        # to int8, reducing optimizer memory by ~75%. Unlike DeepSpeed, this works
+        # with multiple optimizers — critical for GAN dual-optimizer training.
+        if self._optimizer_8bit:
+            import bitsandbytes as bnb
+            opt_g = bnb.optim.AdamW8bit(gen_params, lr=self.lr, betas=self.betas, weight_decay=1e-4)
+            opt_d = bnb.optim.AdamW8bit(self.discriminator.parameters(), lr=self.lr * 0.5, betas=self.betas, weight_decay=1e-4)
+            print("[Optimizer] Using bitsandbytes AdamW8bit (~75% optimizer state memory savings)")
+        else:
+            # Standard AdamW: decouples weight decay from gradient update
+            opt_g = torch.optim.AdamW(gen_params, lr=self.lr, betas=self.betas, weight_decay=1e-4)
+            opt_d = torch.optim.AdamW(self.discriminator.parameters(), lr=self.lr * 0.5, betas=self.betas, weight_decay=1e-4)
         
         t_max = self.trainer.max_epochs 
         warmup_epochs = max(1, t_max // 10)

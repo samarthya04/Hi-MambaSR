@@ -71,7 +71,7 @@ class Diffusion:
             self.alpha_bar_prev = np.append(1.0, self.alpha_bar[:-1])
         else:
             # DDIM Sub-sequence for fast sampling logic
-            # Ensures 20-step evaluation perfectly matches the 1000-step training manifold
+            # Ensures evaluation steps correctly subsample from the training schedule
             step_ratio = self.train_timesteps // self.timesteps
             seq = (np.arange(1, self.timesteps + 1) * step_ratio) - 1
             

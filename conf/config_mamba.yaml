@@ -13,8 +13,7 @@ model:
                               # this weight directly drives perceptual fidelity
   alfa_adv: 1e-3              # Reduced: adversarial signal is healthy now, 
                               # lowering it prevents texture hallucinations
-  load_model: null            # CRITICAL: Start fresh. Old checkpoints trained with
-                              # broken gradients will poison the new training.
+  load_model: 'models/checkpoints/last.ckpt'
 
 trainer:
   max_epochs: 100             # Extended for proper convergence with corrected losses
@@ -23,15 +22,17 @@ trainer:
   limit_val_batches: 0.15     # Slightly more validation for reliable LPIPS tracking
   log_every_n_steps: 10 
   precision: 'bf16-mixed'       
-  accumulate_grad_batches: 32   # Increased to 16 to compensate for small 6GB VRAM physical batch size (4)
+  accumulate_grad_batches: 16   # Effective batch = 2 × 16 = 32
   gradient_clip_val: 1.0        # Synced with the Mamba stability fixes in train_model.py
   accelerator: 'gpu' 
   devices: 1
-  benchmark: true             
+  benchmark: true
+  optimizer_8bit: true           # 8-bit Adam via bitsandbytes: ~75% optimizer state memory savings
+  resume_from_checkpoint: 'models/checkpoints/last.ckpt'         
 
 dataset:
   name: 'celeb'               
-  batch_size: 2                # Reduced for 6GB VRAM; effective batch = 2 × 32 accumulation = 64
+  batch_size: 2                # Physical micro-batch; effective batch = 2 × 16 accumulation = 32
   resize: true
   scale: 4                     
 
@@ -60,7 +61,7 @@ unet:
   - 256                        
 
 diffusion:
-  timesteps: 1000              
+  timesteps: 500              
   beta_type: 'cosine'          
   posterior_type: 'ddpm' 
   validation_timesteps: 25     

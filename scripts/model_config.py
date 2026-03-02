@@ -85,6 +85,7 @@ def initialize_model(cfg, device, model_class, use_discriminator=True):
         alfa_perceptual=cfg.model.alfa_perceptual,
         alfa_adv=cfg.model.alfa_adv,
         vgg_loss=vgg_loss,
+        optimizer_8bit=cfg.trainer.get('optimizer_8bit', False),
     )
 
     # 7. Loading Strategy (Supports both .pth weights and .ckpt training states)
@@ -114,6 +115,7 @@ def initialize_model(cfg, device, model_class, use_discriminator=True):
                 alfa_perceptual=cfg.model.alfa_perceptual,
                 alfa_adv=cfg.model.alfa_adv,
                 vgg_loss=vgg_loss,
+                optimizer_8bit=cfg.trainer.get('optimizer_8bit', False),
             )
         else:
             raise ValueError(f"Unsupported weight format: {ext}")

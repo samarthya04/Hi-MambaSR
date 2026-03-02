@@ -29,7 +29,7 @@
 
 A **Relativistic Patch-GAN discriminator** with Spectral Normalisation and Instance Normalisation drives adversarial training, while a multi-scale **VGG-19 perceptual loss** (with gradient checkpointing) and a **Sobel edge-aware loss** guide the generator toward natural image manifolds.
 
-A **pixel-space residual skip** (bicubic up-sample + VAE residual) bypasses autoencoder blurring, and a 20-step **DDIM fast-sampling** trajectory replaces the full 1000-step DDPM chain at inference time.
+A **pixel-space residual skip** (bicubic up-sample + VAE residual) bypasses autoencoder blurring, and a 25-step **DDIM fast-sampling** trajectory replaces the full 500-step DDPM chain at inference time.
 
 <div align="center">
   <img src="figures/himambasr_architecture.png" width="85%" alt="Hi-MambaSR Architecture">
@@ -41,9 +41,11 @@ A **pixel-space residual skip** (bicubic up-sample + VAE residual) bypasses auto
 ## Key Contributions
 
 1. **6 GB VRAM-Hardened Training Pipeline**
-   - Micro-batch size of 2 with gradient accumulation of 32 (effective batch = 64).
-   - Gradient checkpointing in the VGG-19 feature extractor and the Mamba bottleneck to cap peak memory.
-   - Sequential micro-batch VAE decoding during validation/test to avoid OOM.
+   - Micro-batch size of 2 with gradient accumulation of 16 (effective batch = 32).
+   - **8-bit Adam** (`bitsandbytes.optim.AdamW8bit`) reduces optimizer state memory by ~75%.
+   - Gradient checkpointing in SwinBlock attention, Mamba SSM bottleneck, and the UNet backbone.
+   - Sequential micro-batch VAE decoding with cached outputs to minimise redundant decode calls.
+   - Frozen VAE + LPIPS backbone eliminates gradient storage for ~86M non-trainable parameters.
 
 2. **Stable Mamba Integration**
    - RMSNorm replaces LayerNorm to prevent mixed-precision instability in the SSM state matrix.
@@ -56,9 +58,10 @@ A **pixel-space residual skip** (bicubic up-sample + VAE residual) bypasses auto
 4. **Small-Batch GAN Stability**
    - Instance Normalisation in the discriminator prevents batch-statistics collapse at batch size 2–4.
    - Spectral Normalisation enforces Lipschitz continuity across all convolutional layers.
+   - Discriminator updates every 4th step to balance G/D convergence rates.
 
 5. **Accelerated Inference**
-   - Continuous 1000-step DDPM training schedule properly sub-sampled to a 20–50 step DDIM trajectory with correct `alpha_bar` interpolation.
+   - 500-step cosine DDPM training schedule properly sub-sampled to a 25-step DDIM trajectory with correct `alpha_bar` interpolation.
 
 <div align="center">
   <img src="figures/himamba_bottleneck_detail.png" width="70%" alt="HiMamba Bottleneck Detail">
@@ -161,9 +164,11 @@ Key default settings (see [`conf/config_mamba.yaml`](conf/config_mamba.yaml)):
 | Parameter | Value | Rationale |
 |---|---|---|
 | `dataset.batch_size` | 2 | Fits within 6 GB VRAM |
-| `trainer.accumulate_grad_batches` | 32 | Effective batch size = 64 |
+| `trainer.accumulate_grad_batches` | 16 | Effective batch size = 32 |
 | `trainer.precision` | `bf16-mixed` | Reduces memory; stable with RMSNorm |
+| `trainer.optimizer_8bit` | `true` | 8-bit Adam via bitsandbytes (~75% optimizer memory savings) |
 | `trainer.gradient_clip_val` | 1.0 | Prevents Mamba state-matrix divergence |
+| `diffusion.timesteps` | 500 | Balanced quality/speed for training |
 | `diffusion.beta_type` | `cosine` | Smoother noise schedule for latent diffusion |
 | `checkpoint.monitor` | `val/LPIPS` | Optimises for perceptual fidelity |
 
@@ -246,21 +251,23 @@ Output: ε̂ ∈ ℝ^{B×4×H×W}                   (predicted noise)
 ### Loss Function
 
 ```
-L_total = L_pixel  +  α_p · L_perceptual  +  α_a · L_adversarial  +  L_edge
+L_total = L_content  +  α_p · (L_LPIPS + L_VGG)  +  0.05 · L_edge  +  5e-4 · L_lat_reg
 
-L_pixel       = L1(SR, HR)
-L_perceptual  = Σ_k w_k · L1(VGG_k(SR), VGG_k(HR))       (k ∈ {conv1_2 … conv5_4})
-L_adversarial = BCE(D(SR|LR) − 𝔼[D(HR|LR)], 1)           (Relativistic average)
-L_edge        = L1(Sobel(SR), Sobel(HR))
+L_content     = L1(z_SR, z_HR)                              (latent-space reconstruction)
+L_LPIPS       = LPIPS(SR, HR)                                (direct perceptual similarity)
+L_VGG         = Σ_k w_k · L1(VGG_k(SR), VGG_k(HR))          (k ∈ {conv1_2 … conv5_4})
+L_edge        = L1(Sobel(SR), Sobel(HR))                     (edge preservation)
+L_lat_reg     = mean(|z_SR|)                                 (soft latent regularisation)
+L_adversarial = BCE(D(SR_s|HR_s), 1-y)                      (logged only, detached from G)
 ```
 
 ### Diffusion Engine
 
 | Property | Training | Inference |
 |---|---|---|
-| Schedule | Cosine β, 1000 steps | Sub-sampled from training schedule |
-| Posterior | DDPM (stochastic) | DDIM (deterministic, 20–50 steps) |
-| Latent space | AutoencoderKL / AutoencoderTiny | Same encoder; micro-batch decoder |
+| Schedule | Cosine β, 500 steps | Sub-sampled from training schedule |
+| Posterior | DDPM (stochastic) | DDIM (deterministic, 25 steps) |
+| Latent space | AutoencoderKL (frozen) | Same encoder; micro-batch decoder |
 
 ---
 
@@ -320,7 +327,7 @@ If you find Hi-MambaSR useful in your research, please consider citing:
 @software{chattree2025himambasr,
   author    = {Chattree, Samarthya Earnest},
   title     = {{Hi-MambaSR}: Hierarchical State-Space Refinement for Latent Diffusion Super-Resolution},
-  year      = {2026},
+  year      = {2025},
   url       = {https://github.com/samarthya04/Hi-MambaSR}
 }
 ```
