@@ -133,5 +133,5 @@ Hi-MambaSR uses a multi-layered approach to fit training within 6GB VRAM:
 | **VAE Tiling + Slicing** | `AutoencoderKL.enable_tiling/slicing()` | Reduces peak VAE decode memory |
 | **Micro-batch VAE Decode** | `micro_batch_decode()` in training step | Sequential decoding caps VRAM spikes |
 | **bf16-mixed Precision** | PyTorch Lightning precision plugin | ~50% reduction in activation/weight memory |
-| **Frozen Components** | VAE encoder/decoder, LPIPS backbone | Eliminates gradient storage for ~86M params |
+| **Frozen Components** | VAE encoder/decoder, LPIPS backbone | Eliminates gradient storage for ~125M params |
 | **Cached Discriminator Inputs** | Reuses decoded images from generator block | Eliminates 2 redundant VAE decodes/step |
