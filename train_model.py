@@ -8,9 +8,13 @@ State-Dict Serialization: Optimized the saving logic. Instead of just saving a L
 Flexible Loading: The test mode now intelligently detects if you are loading a .ckpt (full training state) or a .pth (weights only), making it much easier to run evaluations on different machines.
 """
 
+import os
+# Prevent W&B socket issues in long-running training sessions
+os.environ.setdefault("WANDB_START_METHOD", "thread")
+
 import hydra
 import torch
-import os
+import logging
 import wandb
 from omegaconf import OmegaConf
 from pytorch_lightning import Trainer, seed_everything
@@ -24,6 +28,84 @@ from scripts.exceptions import (
 )
 from scripts.model_config import model_selection
 from scripts.utilis import model_path
+
+log = logging.getLogger(__name__)
+
+
+class FaultTolerantWandbLogger(WandbLogger):
+    """
+    A WandbLogger wrapper that gracefully handles BrokenPipeError and
+    ConnectionError. When the W&B background service dies (common in
+    long training runs), this prevents the logging failure from crashing
+    the entire training process. Training continues and checkpoints are
+    still saved normally.
+
+    After MAX_WARNINGS consecutive failures, W&B logging is fully disabled
+    to avoid log spam. A reconnection is attempted after RECONNECT_INTERVAL
+    steps to recover if the W&B service comes back.
+    """
+
+    MAX_WARNINGS = 5
+    RECONNECT_INTERVAL = 500  # steps between reconnection attempts
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._wandb_failed_count = 0
+        self._wandb_disabled = False
+        self._last_reconnect_step = 0
+
+    def _try_reconnect(self, step):
+        """Attempt to reinitialize W&B connection after cooldown period."""
+        if step is None or (step - self._last_reconnect_step) < self.RECONNECT_INTERVAL:
+            return False
+        self._last_reconnect_step = step
+        try:
+            # Test if wandb is still alive by checking the run object
+            if wandb.run is not None and wandb.run._backend is not None:
+                # Try a lightweight operation
+                wandb.run.log({}, commit=False)
+                log.info(f"W&B connection recovered at step {step}. Resuming logging.")
+                self._wandb_disabled = False
+                self._wandb_failed_count = 0
+                return True
+        except Exception:
+            pass
+        return False
+
+    def log_metrics(self, metrics, step=None):
+        if self._wandb_disabled:
+            # Periodically try to reconnect
+            if not self._try_reconnect(step):
+                return
+        try:
+            super().log_metrics(metrics, step=step)
+            # Reset failure count on success
+            if self._wandb_failed_count > 0:
+                self._wandb_failed_count = 0
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            self._wandb_failed_count += 1
+            if self._wandb_failed_count <= self.MAX_WARNINGS:
+                log.warning(
+                    f"W&B logging failed (step={step}): {e}. "
+                    f"({self._wandb_failed_count}/{self.MAX_WARNINGS} warnings before suppression)"
+                )
+            if self._wandb_failed_count == self.MAX_WARNINGS:
+                log.warning(
+                    "W&B logging disabled for this run due to persistent connection failure. "
+                    f"Will retry every {self.RECONNECT_INTERVAL} steps. "
+                    "Training and checkpointing continue normally."
+                )
+                self._wandb_disabled = True
+                self._last_reconnect_step = step or 0
+
+    def log_hyperparams(self, params):
+        if self._wandb_disabled:
+            return
+        try:
+            super().log_hyperparams(params)
+        except (BrokenPipeError, ConnectionError, OSError) as e:
+            log.warning(f"W&B hyperparams logging failed: {e}.")
+
 
 @hydra.main(version_base=None, config_path="conf", config_name="config_mamba")
 def main(cfg) -> None:
@@ -40,8 +122,8 @@ def main(cfg) -> None:
     final_model_path = model_path(cfg)
     config_dict = OmegaConf.to_container(cfg, resolve=True)
     
-    # Initialize Research Logger (WandB)
-    logger = WandbLogger(
+    # Initialize Research Logger (Fault-Tolerant WandB)
+    logger = FaultTolerantWandbLogger(
         project=cfg.wandb.project,
         entity=cfg.wandb.entity,
         name=final_model_path.split("/")[-1],
@@ -65,6 +147,17 @@ def main(cfg) -> None:
         save_last=True
     )
 
+    # Periodic checkpoint: saves every N steps INDEPENDENTLY of validation.
+    # Prevents catastrophic loss when validation crashes (e.g. W&B broken pipe).
+    # With ~10500 steps/epoch, every_n_train_steps=2000 means max ~30 min lost.
+    periodic_checkpoint = ModelCheckpoint(
+        dirpath=cfg.checkpoint.dirpath,
+        filename="periodic-{epoch:02d}-{step}",
+        every_n_train_steps=2000,
+        save_top_k=1,           # Only keep the single most recent periodic save
+        save_last=True,         # Always update last.ckpt
+    )
+
     lr_monitor = LearningRateMonitor(logging_interval='step')
 
     # Initialize High-Performance Trainer
@@ -73,7 +166,7 @@ def main(cfg) -> None:
         max_steps=cfg.trainer.max_steps,
         accelerator=cfg.trainer.accelerator,
         devices=cfg.trainer.devices,
-        callbacks=[checkpoint_callback, lr_monitor],
+        callbacks=[checkpoint_callback, periodic_checkpoint, lr_monitor],
         logger=logger,
         check_val_every_n_epoch=cfg.trainer.check_val_every_n_epoch,
         limit_val_batches=cfg.trainer.limit_val_batches,
@@ -95,18 +188,22 @@ def main(cfg) -> None:
             best_ckpt_path = checkpoint_callback.last_model_path
 
         if best_ckpt_path:
-            print(f"Convergence reached. Loading weights from: {best_ckpt_path}")
-            
-            # Load the state dict manually to bypass __init__ compilation issues
-            checkpoint = torch.load(best_ckpt_path, map_location=device)
-            
-            # Use the existing model instance to load weights
-            model.load_state_dict(checkpoint['state_dict'])
-            
-            # Now save the clean state_dict
-            save_path = f"{final_model_path}_best.pth"
-            torch.save(model.state_dict(), save_path)
-            print(f"Research weights serialized to: {save_path}")
+            try:
+                print(f"Convergence reached. Loading weights from: {best_ckpt_path}")
+                
+                # Load the state dict manually to bypass __init__ compilation issues
+                checkpoint = torch.load(best_ckpt_path, map_location=device)
+                
+                # Use the existing model instance to load weights
+                model.load_state_dict(checkpoint['state_dict'])
+                
+                # Now save the clean state_dict
+                save_path = f"{final_model_path}_best.pth"
+                torch.save(model.state_dict(), save_path)
+                print(f"Research weights serialized to: {save_path}")
+            except Exception as e:
+                log.error(f"Post-training state serialization failed: {e}. "
+                          f"The checkpoint at '{best_ckpt_path}' is still valid.")
 
         if cfg.mode == "train-test" and best_ckpt_path:
             print("Entering Evaluation Phase...")

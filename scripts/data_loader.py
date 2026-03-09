@@ -1,8 +1,11 @@
 import os
 import math
+import logging
 import numpy as np
 from pathlib import Path
 from PIL import Image
+
+log = logging.getLogger(__name__)
 
 import torch
 import torch.nn.functional as F
@@ -38,24 +41,40 @@ class PairedImagesDataset(Dataset):
         
         # Performance: Pre-filter file list to avoid filesystem thrashing
         valid_exts = ('.jpg', '.jpeg', '.png', '.webp', '.tif')
-        self.file_pairs = [
-            f for f in sorted(os.listdir(lr_dir)) if f.lower().endswith(valid_exts)
-        ]
+        lr_files = [f for f in sorted(os.listdir(lr_dir)) if f.lower().endswith(valid_exts)]
+        
+        # Validate that each LR file has a matching HR pair.
+        # Missing pairs cause FileNotFoundError mid-epoch; filter them at init.
+        self.file_pairs = []
+        for f in lr_files:
+            if (Path(hr_dir) / f).exists():
+                self.file_pairs.append(f)
+            else:
+                log.warning(f"Skipping '{f}': missing HR pair in {hr_dir}")
 
     def __len__(self) -> int:
         return len(self.file_pairs)
 
     def __getitem__(self, idx: int) -> tuple[torch.Tensor, torch.Tensor]:
-        filename = self.file_pairs[idx]
+        # Retry loop: if an image is corrupt/truncated, skip to the next valid one.
+        # Prevents a single bad file from crashing a multi-hour training run.
+        for attempt_offset in range(min(5, len(self.file_pairs))):
+            try:
+                actual_idx = (idx + attempt_offset) % len(self.file_pairs)
+                filename = self.file_pairs[actual_idx]
+                
+                img_lr = Image.open(self.lr_dir / filename).convert("RGB")
+                img_hr = Image.open(self.hr_dir / filename).convert("RGB")
+
+                if self.transform_hr: img_hr = self.transform_hr(img_hr)
+                if self.transform_lr: img_lr = self.transform_lr(img_lr)
+
+                return img_lr, img_hr
+            except (OSError, IOError, SyntaxError) as e:
+                log.warning(f"Skipping corrupt image '{self.file_pairs[(idx + attempt_offset) % len(self.file_pairs)]}': {e}")
         
-        # Load and convert to RGB in one step to minimize PIL overhead
-        img_lr = Image.open(self.lr_dir / filename).convert("RGB")
-        img_hr = Image.open(self.hr_dir / filename).convert("RGB")
-
-        if self.transform_hr: img_hr = self.transform_hr(img_hr)
-        if self.transform_lr: img_lr = self.transform_lr(img_lr)
-
-        return img_lr, img_hr
+        # If all retries fail, raise to prevent infinite loops
+        raise RuntimeError(f"Failed to load any valid image near index {idx}")
 
 class PairedImagesDataModule(pl.LightningDataModule):
     """
@@ -94,9 +113,14 @@ class PairedImagesDataModule(pl.LightningDataModule):
             for s in ["train", "val", "test"]:
                 path_lr = Path(str(self.lr_dir).replace("|train_val_test|", s))
                 path_hr = Path(str(self.hr_dir).replace("|train_val_test|", s))
+                if not path_lr.is_dir() or not path_hr.is_dir():
+                    log.warning(f"Split '{s}' not found at {path_lr} / {path_hr} — skipping.")
+                    continue
                 setattr(self, f"paired_images_{s}", PairedImagesDataset(path_lr, path_hr, self.transform_hr, self.transform_lr))
                 
         elif stage == "only_test":
+            if not Path(self.lr_dir).is_dir() or not Path(self.hr_dir).is_dir():
+                raise FileNotFoundError(f"Test data not found: LR={self.lr_dir}, HR={self.hr_dir}")
             self.paired_images_test = PairedImagesDataset(self.lr_dir, self.hr_dir, self.transform_hr, self.transform_lr)
 
     def train_dataloader(self):
@@ -125,6 +149,8 @@ class PairedImagesDataModule(pl.LightningDataModule):
         )
 
     def test_dataloader(self):
+        if not hasattr(self, 'paired_images_test'):
+            return None
         return DataLoader(
             self.paired_images_test, 
             batch_size=self.batch_size, 

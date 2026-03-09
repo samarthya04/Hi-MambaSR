@@ -405,7 +405,10 @@ class HiMambaSR(pl.LightningModule):
             per_metrics = [(val_psnr, val_ssim, val_lpips)]
             img_grid = self.plot_images_with_metrics(hr_img.float(), lr_img.float(), sr_img.float(), padding_info, 
                                                    f"Hi-MambaSR | Epoch {self.current_epoch}", per_metrics)
-            self.logger.experiment.log({"val_samples": wandb.Image(img_grid)})
+            try:
+                self.logger.experiment.log({"val_samples": wandb.Image(img_grid)})
+            except (BrokenPipeError, ConnectionError, OSError):
+                pass  # W&B connection lost — validation metrics still logged via FaultTolerantWandbLogger
 
         self.log_dict({
             "val/PSNR": val_psnr, 

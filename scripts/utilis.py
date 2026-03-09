@@ -20,7 +20,7 @@ def model_path(cfg):
     os.makedirs(model_dir, exist_ok=True)
     version_file = os.path.join(model_dir, "models_version.json")
     if os.path.exists(version_file):
-        with open(version_file, "rb") as f:
+        with open(version_file, "r") as f:
             models_version = json.load(f)
     else:
         models_version = {model_name: 0}

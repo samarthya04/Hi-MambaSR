@@ -45,7 +45,7 @@ A **pixel-space residual skip** (bicubic up-sample + VAE residual) bypasses auto
    - **8-bit Adam** (`bitsandbytes.optim.AdamW8bit`) reduces optimizer state memory by ~75%.
    - Gradient checkpointing in SwinBlock attention, Mamba SSM bottleneck, and the UNet backbone.
    - Sequential micro-batch VAE decoding with cached outputs to minimise redundant decode calls.
-   - Frozen VAE + LPIPS backbone eliminates gradient storage for ~125M non-trainable parameters.
+   - Frozen VAE + LPIPS backbone eliminates gradient storage for ~86M non-trainable parameters.
 
 2. **Stable Mamba Integration**
    - RMSNorm replaces LayerNorm to prevent mixed-precision instability in the SSM state matrix.

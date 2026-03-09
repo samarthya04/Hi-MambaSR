@@ -12,15 +12,16 @@ Multi-GPU Inference Support: The script is fully compatible with Lightning's acc
 
 import os
 import warnings
+import logging
 import hydra
 import pandas as pd
 import torch
 import wandb
 from omegaconf import OmegaConf
 from pytorch_lightning import Trainer, seed_everything
-from pytorch_lightning.loggers import WandbLogger
 from typing import List, Dict
 
+from train_model import FaultTolerantWandbLogger
 from scripts.data_loader import train_val_test_loader
 from scripts.exceptions import (
     EvaluateFreshInitializedModelException,
@@ -28,6 +29,8 @@ from scripts.exceptions import (
 )
 from scripts.model_config import model_selection
 from scripts.utilis import model_path
+
+log = logging.getLogger(__name__)
 
 def save_results_to_csv(results: List[Dict], filename: str) -> None:
     """
@@ -68,7 +71,10 @@ def log_visual_metrics_to_wandb(results: List[Dict], mode: str) -> None:
 
     for m_name, data in metrics.items():
         table = wandb.Table(data=data, columns=["Configuration", m_name])
-        wandb.log({f"eval/chart_{m_name}": wandb.plot.bar(table, "Configuration", m_name)})
+        try:
+            wandb.log({f"eval/chart_{m_name}": wandb.plot.bar(table, "Configuration", m_name)})
+        except (BrokenPipeError, ConnectionError, OSError):
+            log.warning(f"Failed to log W&B chart for {m_name} — connection lost.")
 
 def run_evaluation_suite(cfg, model, trainer: Trainer, test_loader) -> None:
     """
@@ -127,8 +133,8 @@ def main(cfg) -> None:
     final_model_path = model_path(cfg)
     config_dict = OmegaConf.to_container(cfg, resolve=True)
     
-    # Initialize Research Logger
-    logger = WandbLogger(
+    # Initialize Research Logger (Fault-Tolerant)
+    logger = FaultTolerantWandbLogger(
         project=cfg.wandb.project,
         entity=cfg.wandb.entity,
         name=f"Eval_{final_model_path.split('/')[-1]}",

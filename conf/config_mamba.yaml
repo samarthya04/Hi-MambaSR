@@ -3,20 +3,20 @@
 # Optimized Configuration | Target: LPIPS < 0.190
 # ==============================================================================
 
-mode: 'train-test' 
+mode: 'train' 
 use_perceptual_loss: true 
 
 model:
   name: 'Hi-MambaSR'
-  lr: 2e-5                    # Slightly higher to compensate for AdamW + L1 dynamics
-  alfa_perceptual: 0.08       # Increased: now that LPIPS/VGG gradients actually flow,
+  lr: 5e-5                    # Slightly higher to compensate for AdamW + L1 dynamics
+  alfa_perceptual: 0.20       # Increased: now that LPIPS/VGG gradients actually flow,
                               # this weight directly drives perceptual fidelity
-  alfa_adv: 1e-3              # Reduced: adversarial signal is healthy now, 
+  alfa_adv: 5e-4              # Reduced: adversarial signal is healthy now, 
                               # lowering it prevents texture hallucinations
-  load_model: 'models/checkpoints/last.ckpt'
+  load_model: 'models/checkpoints/periodic-epoch=12-step=8000.ckpt'
 
 trainer:
-  max_epochs: 100             # Extended for proper convergence with corrected losses
+  max_epochs: 30             # Extended for proper convergence with corrected losses
   max_steps: -1
   check_val_every_n_epoch: 5  
   limit_val_batches: 0.15     # Slightly more validation for reliable LPIPS tracking
@@ -28,7 +28,7 @@ trainer:
   devices: 1
   benchmark: true
   optimizer_8bit: true           # 8-bit Adam via bitsandbytes: ~75% optimizer state memory savings
-  resume_from_checkpoint: 'models/checkpoints/last.ckpt'         
+  resume_from_checkpoint: 'models/checkpoints/periodic-epoch=12-step=8000.ckpt'        
 
 dataset:
   name: 'celeb'               
