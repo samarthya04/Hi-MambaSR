@@ -1,0 +1,78 @@
+# ==============================================================================
+# Hi-MambaSR: Kaggle T4 (16GB VRAM) Cloud Configuration
+# Resume from local checkpoint on a free Kaggle GPU
+# ==============================================================================
+
+mode: 'train' 
+use_perceptual_loss: true 
+
+model:
+  name: 'Hi-MambaSR'
+  lr: 5e-5
+  alfa_perceptual: 0.20
+  alfa_adv: 5e-4
+  load_model: '/kaggle/input/hi-mambasr-checkpoint/last-v2.ckpt'
+
+trainer:
+  max_epochs: 30
+  max_steps: -1
+  check_val_every_n_epoch: 5  
+  limit_val_batches: 0.15
+  log_every_n_steps: 10 
+  precision: 'bf16-mixed'       
+  # T4 has 16GB — can fit batch_size=4, halving accumulation steps
+  accumulate_grad_batches: 8    # Effective batch = 4 × 8 = 32
+  gradient_clip_val: 1.0
+  accelerator: 'gpu' 
+  devices: 1
+  benchmark: true
+  optimizer_8bit: true
+  resume_from_checkpoint: '/kaggle/input/hi-mambasr-checkpoint/last-v2.ckpt'
+
+dataset:
+  name: 'celeb'               
+  batch_size: 4                 # Up from 2 — T4 has more VRAM than your laptop
+  resize: true
+  scale: 4                     
+
+evaluation:
+  mode: 'all'                  
+  steps: [25, 50]             
+  posteriors: ['ddim']          
+  save_results: true
+  results_file: 'evaluation_results/hi_mambasr_benchmarks.csv'
+
+checkpoint:
+  monitor: 'val/LPIPS'        
+  dirpath: '/kaggle/working/checkpoints/'   # Kaggle persistent output directory
+  save_top_k: 2                # Save less — Kaggle has 20GB output limit
+  mode: 'min'
+  save_last: true              
+  filename: 'Hi-MambaSR-{epoch:02d}-{val/LPIPS:.4f}'
+
+autoencoder: 'VAE'             
+feature_extractor: true        
+
+unet:                          
+  - 64
+  - 96
+  - 128
+  - 256                        
+
+diffusion:
+  timesteps: 500              
+  beta_type: 'cosine'          
+  posterior_type: 'ddpm' 
+  validation_timesteps: 25     
+  validation_posterior_type: 'ddim'
+
+discriminator:
+  in_channels: 6               
+  channels:
+    - 64
+    - 128
+    - 256
+
+wandb:
+  project: 'Hi-MambaSR'        
+  entity: 'samarthya04-kiit-deemed-to-be-university'
